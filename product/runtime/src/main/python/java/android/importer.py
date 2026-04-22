@@ -17,14 +17,25 @@ import sys
 from tempfile import NamedTemporaryFile
 import time
 from threading import RLock
+import types
 from zipfile import ZipFile, ZipInfo
 from zipimport import zipimporter
 
 import java.chaquopy
+
+# elftools imports pdb, which in Python 3.14 pulls in asyncio, socket and other large
+# things. Since we'll never use this feature of elftools, disable that import.
+sys.modules["pdb"] = types.ModuleType("pdb")
 from java._vendor.elftools.elf.elffile import ELFFile
+del sys.modules["pdb"]
 
 from com.chaquo.python.android import AndroidPlatform
 from com.chaquo.python.internal import Common
+
+if sys.version_info < (3, 11):
+    from importlib.abc import Traversable
+else:
+    from importlib.resources.abc import Traversable
 
 
 import_triggers = {}
@@ -61,47 +72,37 @@ def initialize_importlib(context, build_json, app_path):
     sys.path_hooks[sys.path_hooks.index(zipimporter)] = ChaquopyZipImporter
     sys.path_importer_cache.clear()
 
+    finders = []
     sys.path = [p for p in sys.path if exists(p)]  # Remove nonexistent default paths
     for i, asset_name in enumerate(app_path):
         entry = join(ASSET_PREFIX, asset_name)
         sys.path.insert(i, entry)
         finder = get_importer(entry)
+        finders.append(finder)
         assert isinstance(finder, AssetFinder), ("Finder for '{}' is {}"
                                                  .format(entry, type(finder).__name__))
 
-        # Extract data files from the root directory. This includes .pth files, which will be
-        # read by addsitedir below.
-        finder.extract_dir("", recursive=False)
+        # Extract necessary files from the root directory. This includes .pth files,
+        # which will be read by addsitedir below. If requested, also extract all Python
+        # packages.
+        finder.extract_dir("", recursive="*" in build_json["extract_packages"])
 
-        # Extract data files from top-level directories which aren't Python packages.
+        # Extract necessary files from top-level directories which aren't Python
+        # packages or dist-info directories.
         for name in finder.listdir(""):
             if finder.isdir(name) and \
                not is_dist_info(name) and \
                not any(finder.exists(f"{name}/__init__{suffix}") for suffix in LOADERS):
                 finder.extract_dir(name)
 
-        # We do this here instead of in AssetFinder.__init__ because code in the .pth files may
-        # require the finder to be fully available to the system, which isn't the case until
-        # get_importer returns.
+    # We do this in a separate loop because code in the .pth files may require sys.path
+    # to be fully initialized. Use reverse order to initialize lower-level things first.
+    for finder in reversed(finders):
         site.addsitedir(finder.extract_root)
-
-    if sys.version_info[:2] == (3, 9):
-        from importlib import _common
-        global fallback_resources_original
-        fallback_resources_original = _common.fallback_resources
-        _common.fallback_resources = fallback_resources_39
 
     global spec_from_file_location_original
     spec_from_file_location_original = util.spec_from_file_location
     util.spec_from_file_location = spec_from_file_location_override
-
-
-# Python 3.9 only supports importlib.resources.files for the standard importers.
-def fallback_resources_39(spec):
-    if isinstance(spec.loader, AssetLoader):
-        return spec.loader.get_resource_reader(spec.name).files()
-    else:
-        return fallback_resources_original(spec)
 
 
 def spec_from_file_location_override(name, location=None, *args, loader=None, **kwargs):
@@ -136,14 +137,17 @@ def initialize_ctypes():
     def find_library_override(name):
         filename = "lib{}.so".format(name)
 
-        # First look in the requirements. The return value will probably be passed to
-        # CDLL_init_override below, but the caller may load the library using another
-        # API (e.g. soundfile uses ffi.dlopen), so make sure its dependencies are
-        # extracted and pre-loaded.
+        # First look in the requirements.
         try:
-            return reqs_finder.extract_lib(filename)
+            filename = reqs_finder.find_lib(filename)
         except FileNotFoundError:
             pass
+        else:
+            # The return value will probably be passed to CDLL_init_override below, but
+            # the caller may load the library in another way (e.g. soundfile uses
+            # ffi.dlopen), so make sure its dependencies are pre-loaded.
+            load_needed(filename)
+            return filename
 
         # For system libraries I can't see any easy way of finding the absolute library
         # filename, but we can at least support the case where the user passes the return value
@@ -160,15 +164,12 @@ def initialize_ctypes():
         if name:  # CDLL(None) is equivalent to dlopen(NULL).
             if "/" not in name:
                 try:
-                    name = reqs_finder.extract_lib(name)
+                    name = reqs_finder.find_lib(name)
                 except FileNotFoundError:
                     pass
-            else:
-                # Some packages (e.g. llvmlite) use CDLL to load libraries from their own
-                # directories.
-                finder = get_importer(dirname(name))
-                if isinstance(finder, AssetFinder):
-                    name = finder.extract_so(name)
+
+            if exists(name):
+                load_needed(name)
 
         CDLL_init_original(self, name, *args, **kwargs)
 
@@ -246,7 +247,9 @@ def load_module_override(load_name, file, pathname, description):
         finder = get_importer(dirname(pathname))
         if hasattr(finder, "prefix"):  # AssetFinder or zipimporter
             entry, base_name = split(pathname)
-            real_name = join(finder.prefix, splitext(base_name)[0]).replace("/", ".")
+            real_name = join(finder.prefix, re.sub(r"\..*", "", base_name)).replace(
+                "/", "."
+            )
             if isinstance(finder, AssetFinder):
                 spec = finder.find_spec(real_name)
                 spec.name = load_name
@@ -356,10 +359,8 @@ class ChaquopyPathFinder(machinery.PathFinder):
 
 # This does not inherit from PosixPath, because that would cause
 # importlib.resources.as_file to return it unchanged, rather than creating a temporary
-# file as it should. However, once our minimum version is Python 3.9, we can inherit
-# from importlib.resources.abc.Traversable, and remove our implementations of read_text,
-# read_bytes, and __truediv__.
-class AssetPath:
+# file as it should.
+class AssetPath(Traversable):
     def __init__(self, path):
         root_dir = path
         while dirname(root_dir) != ASSET_PREFIX:
@@ -404,9 +405,6 @@ class AssetPath:
         else:
             return type(self)(child_path)
 
-    def __truediv__(self, child):
-        return self.joinpath(child)
-
     # `buffering` has no effect because the whole file is read immediately.
     def open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
         if "r" in mode:
@@ -417,10 +415,8 @@ class AssetPath:
                 return bio
         raise ValueError(f"unsupported mode: {mode!r}")
 
-    def read_bytes(self):
-        with self.open('rb') as strm:
-            return strm.read()
-
+    # Traversable.read_text doesn't accept `errors`, which breaks the old importlib API
+    # (https://github.com/python/cpython/issues/127012).
     def read_text(self, encoding=None, errors=None, newline=None):
         with self.open("r", -1, encoding, errors, newline) as strm:
             return strm.read()
@@ -527,30 +523,28 @@ class AssetFinder:
                 if mod_base_name and (mod_base_name != "__init__"):
                     yield prefix + mod_base_name, False
 
-    # If this method raises FileNotFoundError, then maybe it's a system library, or one of the
-    # libraries loaded by AndroidPlatform.loadNativeLibs. If the library is truly missing,
-    # we'll get an exception when we load the file that needs it.
-    def extract_lib(self, filename):
-        return self.extract_so(f"chaquopy/lib/{filename}")
-
-    def extract_so(self, path):
-        path = self.extract_if_changed(self.zip_path(path))
-        load_needed(self, path)
-        return path
+    def find_lib(self, filename):
+        zip_path = f"chaquopy/lib/{filename}"
+        if self.exists(zip_path):
+            return join(self.extract_root, zip_path)
+        else:
+            raise FileNotFoundError(zip_path)
 
     def extract_dir(self, zip_dir, recursive=True):
         dotted_dir = zip_dir.replace("/", ".")
-        extract_package = any((dotted_dir == ep) or dotted_dir.startswith(ep + ".")
-                              for ep in self.extract_packages)
+        extract_package = any(
+            ep in (dotted_dir, "*") or dotted_dir.startswith(ep + ".")
+            for ep in self.extract_packages
+        )
 
         for filename in self.listdir(zip_dir):
             zip_path = join(zip_dir, filename)
             if self.isdir(zip_path):
                 if recursive:
                     self.extract_dir(zip_path)
-            elif (extract_package and filename.endswith(".py")
-                  or not (any(filename.endswith(suffix) for suffix in LOADERS) or
-                          re.search(r"^lib.*\.so\.", filename))):  # e.g. libgfortran
+            # For performance, we don't extract any Python modules unless their
+            # containing package is listed in extract_packages.
+            elif extract_package or not filename.endswith(PYTHON_SUFFIXES):
                 self.extract_if_changed(zip_path)
 
     def extract_if_changed(self, zip_path):
@@ -721,34 +715,46 @@ class SourcelessAssetLoader(AssetLoader, machinery.SourcelessFileLoader):
 
 class ExtensionAssetLoader(AssetLoader, machinery.ExtensionFileLoader):
     def create_module(self, spec):
-        self.finder.extract_so(self.path)
+        self.finder.extract_if_changed(self.finder.zip_path(self.path))
+        load_needed(self.path)
         return super().create_module(spec)
 
 
 needed_lock = RLock()
 needed_loaded = {}
 
-# CDLL will cause a recursive call back to extract_so, so there's no need for any additional
-# recursion here. If we return to executables in the future, we can implement a separate
-# recursive extraction on top of get_needed.
-def load_needed(finder, path):
+# Load any libraries in chaquopy/lib which are needed by the .so file at the given path.
+#
+# RTLD_GLOBAL and RTLD_LOCAL behave a bit differently on Android compared to Linux:
+#
+# * Regardless of the mode, dlopening a library is sufficient to make it available to
+#   other libraries which use its SONAME in a DT_NEEDED entry.
+#
+# * Regardless of the mode, the library's symbols are NOT implicitly available to other
+#   libraries which don't list it in DT_NEEDED. But this may change in the future, so
+#   it's safer for us to use the default of RTLD_LOCAL, which should avoid conflicts
+#   between multiple libraries defining the same symbol.
+#
+# * RTLD_GLOBAL makes the library's symbols available to explicit searches of other
+#   libraries using dlsym, but that probably isn't relevant to us.
+#
+# Sources:
+# * https://github.com/android/ndk/issues/1244#issuecomment-620310397
+# * https://android.googlesource.com/platform/bionic/+/master/android-changes-for-ndk-developers.md
+def load_needed(path):
     with needed_lock:
         for soname in get_needed(path):
             if soname not in needed_loaded:
                 try:
-                    # Before API level 23, the only dlopen mode was RTLD_GLOBAL, and
-                    # RTLD_LOCAL was ignored. From API level 23, RTLD_LOCAL is available
-                    # and used by default, just like in Linux
-                    # (https://android.googlesource.com/platform/bionic/+/master/android-changes-for-ndk-developers.md).
+                    # Whether the library is closed when the CDLL object is garbage
+                    # collected is not documented, so keep a reference for safety.
                     #
-                    # We use RTLD_GLOBAL to make the library's symbols available to
-                    # subsequently-loaded libraries, but this may not actually work -
-                    # see #728.
-                    #
-                    # It doesn't look like the library is closed when the CDLL object is garbage
-                    # collected, but this isn't documented, so keep a reference for safety.
-                    needed_loaded[soname] = ctypes.CDLL(soname, ctypes.RTLD_GLOBAL)
-                except FileNotFoundError:
+                    # CDLL will recursively call load_needed if necessary.
+                    needed_loaded[soname] = ctypes.CDLL(soname)
+                except OSError:
+                    # It's not in chaquopy/lib, but maybe it can be found in some other
+                    # way, such as DT_RUNPATH. If it's truly missing, we'll get an
+                    # exception when we load the file that needs it.
                     needed_loaded[soname] = None
 
 
@@ -763,13 +769,22 @@ def get_needed(path):
             return []
 
 
-# If a module has both a .py and a .pyc file, the .pyc file should be used because
-# it'll load faster.
+# Suffixes are in order of preference.
 LOADERS = {
+    # .so files should come first, to match the standard finder. For example, pyzmq
+    # 27.1.0 depends on this (see zmq/backend/cython/_zmq.py).
+    **{suffix: ExtensionAssetLoader for suffix in _imp.extension_suffixes()},
+
+    # .pyc should be preferred over .py, because it'll load faster.
     ".pyc": SourcelessAssetLoader,
     ".py": SourceAssetLoader,
-    ".so": ExtensionAssetLoader,
 }
+
+# If a filename ends with .so, without any .cpython or .abi3 marker, then we can't
+# distinguish it from a non-Python library, so we must eagerly extract it.
+PYTHON_SUFFIXES = tuple(
+    suffix for suffix in LOADERS if suffix != ".so"
+)
 
 
 class AssetZipFile(ZipFile):

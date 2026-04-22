@@ -1,5 +1,6 @@
 name: CI
 on:
+  pull_request:
   push:
     branches: [master]
 
@@ -12,9 +13,8 @@ defaults:
     shell: bash
 
 jobs:
-
   product:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: smorimoto/tune-github-hosted-runner-network@v1.0.0
       - uses: actions/checkout@v4.1.6
@@ -73,7 +73,7 @@ jobs:
 
 
   docs:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: smorimoto/tune-github-hosted-runner-network@v1.0.0
       - uses: actions/checkout@v4.1.6
@@ -105,7 +105,7 @@ jobs:
 
 
   gradlePython:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: smorimoto/tune-github-hosted-runner-network@v1.0.0
       - uses: actions/checkout@v4.1.6
@@ -123,7 +123,7 @@ jobs:
 
   demo:
     needs: [product]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: smorimoto/tune-github-hosted-runner-network@v1.0.0
       - uses: actions/checkout@v4.1.6
@@ -137,6 +137,7 @@ jobs:
           path: maven
 
       - name: Get keystore
+        if: github.event_name != 'pull_request'
         env:
           CHAQUO_JKS: ${{ secrets.CHAQUO_JKS }}
         run: |
@@ -160,15 +161,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # We'd like to run macOS jobs first, because of their lower concurrency. But
+        # this doesn't reliably work (https://github.com/actions/runner/issues/703).
+        os: [macos, windows, linux]
         agp-version: ${{ fromJSON(needs.product.outputs.agp-versions) }}
-        os: [linux, macos, windows]
         include:
-          # Runners must support all the Python versions in setup-python/action.yml: see
-          # https://github.com/actions/python-versions/blob/main/versions-manifest.json.
+          # Runners must support all the Python versions in setup-python/action.yml.
           - os: linux
-            runs-on: ubuntu-20.04
+            runs-on: ubuntu-22.04
           - os: macos
-            runs-on: macos-13
+            runs-on: macos-15-intel
           - os: windows
             runs-on: windows-2022
 

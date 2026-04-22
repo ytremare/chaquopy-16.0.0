@@ -38,7 +38,7 @@ In your *top-level* `build.gradle` file, set the Chaquopy version:
     }
 
 Also check the Android Gradle plugin version (`com.android.application` or
-`com.android.library`): it should be between 7.0.x and 8.7.x. Older versions are
+`com.android.library`): it should be between 7.3.x and 9.1.x. Older versions are
 supported by :doc:`older versions of Chaquopy <../versions>`. Newer versions may work,
 but have not been tested.
 
@@ -68,9 +68,10 @@ The Python interpreter is a native component, so you must use the `abiFilters
 <https://developer.android.com/studio/projects/gradle-external-native-builds#specify-abi>`_
 setting to specify which ABIs you want the app to support. The currently available ABIs are:
 
-* `armeabi-v7a` for older Android devices (Python 3.11 and older only)
+* `armeabi-v7a` for older Android devices (:ref:`Python 3.11 <python-version>` and older
+  only)
 * `arm64-v8a` for current Android devices, and emulators on Apple silicon
-* `x86` for older emulators (Python 3.11 and older only)
+* `x86` for older emulators (:ref:`Python 3.11 <python-version>` and older only)
 * `x86_64` for current emulators
 
 The following setting will work for most projects:
@@ -167,15 +168,17 @@ example, here's how to create flavors for different :ref:`Python versions
 buildPython
 -----------
 
-Some features require Python 3.8 or later to be available on the build machine. These
-features are indicated by a note in their documentation sections.
+Some features require Python to be available on the build machine. The Python major and
+minor versions must match your app, e.g. if  :ref:`your app's Python version
+<python-version>` is 3.13, then you must build with Python 3.13. The micro version
+doesn't matter.
 
-By default, Chaquopy will try to find Python on the PATH with the standard command for your
-operating system, first with a matching minor version, and then with a matching major version.
-For example, if :ref:`your app's Python version <python-version>` is 3.8, then:
+By default, Chaquopy will try to find Python on the PATH with the standard commands for
+your operating system. For example, if :ref:`your app's Python version <python-version>`
+is 3.13, then:
 
-* On Linux and Mac it will try `python3.8`, then `python3`.
-* On Windows, it will try `py -3.8`, then `py -3`.
+* On Linux and Mac it will try `python3.13`, then `python3`.
+* On Windows, it will try `py -3.13`, then `py -3`.
 * On all platforms, it will finally try `python`.
 
 If this doesn't work for you, set your Python command using the `buildPython` setting.
@@ -184,7 +187,9 @@ For example, on Windows you might use one of the following::
     chaquopy {
         defaultConfig {
             buildPython("C:/path/to/python.exe")
-            buildPython("C:/path/to/py.exe", "-3.8")
+
+            // Commands with multiple arguments must be passed as multiple strings.
+            buildPython("C:/path/to/py.exe", "-3.13")
         }
     }
 
@@ -231,13 +236,22 @@ You can set your app's Python version like this::
 
     chaquopy {
         defaultConfig {
-            version = "3.8"
+            version = "3.13"
         }
     }
 
-In :doc:`this version of Chaquopy <../versions>`, the default Python version is 3.8. The
-other available versions are 3.9, 3.10, 3.11, 3.12 and 3.13, but these may have fewer
-:ref:`packages <android-requirements>` available.
+Or if you're using Briefcase, do the following:
+
+* Create a new virtual environment with the desired Python version.
+* Activate the environment and install Briefcase into it.
+* Run `briefcase create android`.
+
+In :doc:`this version of Chaquopy <../versions>`, the default Python version is 3.10,
+and the other available versions are 3.11, 3.12, 3.13 and 3.14. Different Python
+versions will support a different selection of :ref:`packages <android-requirements>`.
+
+Python 3.11 and older supports both :ref:`32-bit and 64-bit ABIs <android-abis>`. Python
+3.12 and newer supports only 64-bit.
 
 .. _android-source:
 
@@ -332,14 +346,8 @@ install <https://pip.pypa.io/en/stable/cli/pip_install/>`_. For example::
     }
 
 Chaquopy can install almost all pure-Python packages, plus a large selection
-of packages with native components. To see which native packages are currently
-available, you can `browse the repository here <https://chaquo.com/pypi-13.1/>`_. To
-add or update a package:
-
-* Try to build it yourself by following `these instructions
-  <https://github.com/chaquo/chaquopy/blob/master/server/pypi/README.md>`__.
-* Search our `issue tracker <https://github.com/chaquo/chaquopy/issues>`__ for advice
-  on the package, and create a new issue if necessary.
+of packages with native components. If you have trouble installing a package, see
+:ref:`the FAQ <faq-pip>`.
 
 To pass options to `pip install`, give them as a comma-separated list to the `options`
 method. For example::
@@ -397,8 +405,21 @@ can declare them like this::
         }
     }
 
-Each extracted file will slightly slow down your app's startup, so this setting should be
-used on the deepest possible package.
+The files are extracted when the package is imported for the first time. Each extracted
+file will slightly slow down your app's startup, so this setting should be used on the
+deepest possible package.
+
+For development purposes, it is sometimes useful to extract all packages. This is
+possible using a wildcard::
+
+    chaquopy {
+        defaultConfig {
+            extractPackages("*")
+        }
+    }
+
+If the wildcard is used, all packages are imported before your app's code starts
+running.
 
 .. _android-data:
 
@@ -447,11 +468,11 @@ unless they're covered by the :ref:`extractPackages <extractPackages>` setting. 
 this prevents source code text from appearing in stack traces, so during development you
 may wish to disable it. There are individual settings for:
 
-* `src`: :ref:`local source code <android-source>`
+* `src`: :ref:`source code <android-source>`
 * `pip`: :ref:`requirements <android-requirements>`
 * `stdlib`: the Python standard library
 
-For example, to disable compilation of your local source code::
+For example, to disable compilation of your source code::
 
     chaquopy {
         defaultConfig {
@@ -460,11 +481,6 @@ For example, to disable compilation of your local source code::
             }
         }
     }
-
-In the case of `src` and `pip`, your :ref:`buildPython <buildPython>` must use the same
-bytecode format as Chaquopy itself. Usually this means it must have the same minor version,
-e.g. if :ref:`your app's Python version <python-version>` is 3.8, then `buildPython` can be
-any version of Python 3.8.
 
 If bytecode compilation fails, the build will continue with a warning, unless you've
 explicitly set one of the `pyc` settings to `true`. Your app will still work, but its code will
@@ -541,7 +557,7 @@ ssl
 ---
 
 The :any:`ssl` module is configured to use a copy of the CA bundle from `certifi
-<https://pypi.org/project/certifi/>`_ version 2024.8.30. The system CA store is
+<https://pypi.org/project/certifi/>`_ version 2025.8.3. The system CA store is
 not used.
 
 sys

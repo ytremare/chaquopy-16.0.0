@@ -99,7 +99,7 @@ for prefix in $prefixes; do
         # Add _chaquopy suffixed libraries for compatibility with existing wheels. We
         # need this even on Python 3.13, for non-Python wheels like chaquopy-curl.
         chaquopy_name=lib${name}_chaquopy.so
-        "$CC" -shared "-L$prefix/lib" "-l${name}_python" \
+        "$CC" $LDFLAGS -shared "-L$prefix/lib" "-l${name}_python" \
             "-Wl,-soname=$chaquopy_name" \
             -o "$prefix/lib/$chaquopy_name"
         cp "$prefix/lib/lib${name}_"{chaquopy,python}.so "$jniLibs_dir"
@@ -108,9 +108,7 @@ for prefix in $prefixes; do
     mkdir lib-dynload
     dynload_dir="lib-dynload/$abi"
     mkdir -p $dynload_dir
-    for module in $prefix/lib/python$version_short/lib-dynload/*; do
-        cp $module $dynload_dir/$(basename $module | sed 's/.cpython-.*.so/.so/')
-    done
+    cp $prefix/lib/python$version_short/lib-dynload/* $dynload_dir
     rm $dynload_dir/*_test*.so
 
     chmod u+w $(find . -name *.so)
