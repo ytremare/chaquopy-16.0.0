@@ -1,17 +1,18 @@
+# Set Version parameter
+{% set version = "2.33.0" %}
 package:
   name: eccodes
-  version: 2.33.0
-
+  # When updating, consider updating chaquopy-lame as well.
+  version: "{{ version }}"
 build:
-  number: 0
+    number: 0
 source:
   url: https://confluence.ecmwf.int/download/attachments/45757960/eccodes-2.33.0-Source.tar.gz
-#   url: https://confluence.ecmwf.int/download/attachments/45757960/eccodes-2.37.0-Source.tar.gz?api=v2
-#  git_rev: {{ version }}
-  
-requirements:
-  build:
-    - cmake
 
-  host:  
+requirements:
+
+  build:
+    - cmake 3.28.3
+  host: 
     - libaec 1.1.2
+
