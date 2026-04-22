@@ -1,15 +1,16 @@
+# Set Version parameter
+{% set version = "1.1.2" %}
 package:
   name: libaec
-  version: 1.1.2
-
+  # When updating, consider updating chaquopy-lame as well.
+  version: "{{ version }}"
 build:
-  number: 0
+    number: 0
 source:
   url: https://gitlab.dkrz.de/k202009/libaec/-/archive/v1.1.2/libaec-v1.1.2.zip
-#  git_rev: {{ version }}
-  
+
 requirements:
 
   build:
-    - cmake
+    - cmake 3.28.3
 
